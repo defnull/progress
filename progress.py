@@ -5,9 +5,55 @@ import sys
 import math
 from functools import partial
 import itertools
+import struct
 
-from clint.textui.cols import console_width
-import clint.textui.progress
+try:
+    IS_TTY = sys.stdout.isatty()
+except AttributeError:
+    IS_TTY = False
+
+
+def _csize_unix():
+    import termios, fcntl
+
+    if not IS_TTY:
+        return None
+
+    s = struct.pack("HHHH", 0, 0, 0, 0)
+    fd_stdout = sys.stdout.fileno()
+    size = fcntl.ioctl(fd_stdout, termios.TIOCGWINSZ, s)
+    height, width = struct.unpack("HHHH", size)[:2]
+    return width, height
+
+
+def _csize_win():
+    # http://code.activestate.com/recipes/440694/
+    from ctypes import windll, create_string_buffer
+    STDIN, STDOUT, STDERR = -10, -11, -12
+
+    h = windll.kernel32.GetStdHandle(STDERR)
+    csbi = create_string_buffer(22)
+    res = windll.kernel32.GetConsoleScreenBufferInfo(h, csbi)
+
+    if res:
+        (bufx, bufy, curx, cury, wattr,
+         left, top, right, bottom,
+         maxx, maxy) = struct.unpack("hhhhHhhhhhh", csbi.raw)
+        return right - left + 1, bottom - top + 1
+
+
+def _console_width(default=80):
+
+    if sys.platform.startswith('win'):
+        width, height = _csize_win()
+    else:
+        width, height = _csize_unix()
+
+    return width or default
+    
+    
+    
+
 
 class Progress(object):
     def __init__(self, label='', unit='', scale=1):
@@ -65,7 +111,7 @@ class Progress(object):
         return '%02i:%02i:%02i' % (hrs, mns, sec)
 
     def print_lr(self, label, line):
-        cols = console_width({})
+        cols = _console_width()
         ws = (cols - len(self.label) - len(line))
         if ws < 0:
             label = label[:ws - 4] + '... '
