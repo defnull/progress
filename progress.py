@@ -3,8 +3,6 @@
 import time
 import sys
 import math
-from functools import partial
-import itertools
 import struct
 
 try:
@@ -13,8 +11,18 @@ except AttributeError:
     IS_TTY = False
 
 
-def _csize_unix():
-    import termios, fcntl
+def _console_width(default=80):
+    if sys.platform.startswith('win'):
+        width, height = _console_size_win()
+    else:
+        width, height = _console_size_unix()
+
+    return width or default
+
+
+def _console_size_unix():
+    import termios
+    import fcntl
 
     if not IS_TTY:
         return None
@@ -26,47 +34,37 @@ def _csize_unix():
     return width, height
 
 
-def _csize_win():
+def _console_size_win():
     # http://code.activestate.com/recipes/440694/
     from ctypes import windll, create_string_buffer
+
     STDIN, STDOUT, STDERR = -10, -11, -12
 
     h = windll.kernel32.GetStdHandle(STDERR)
     csbi = create_string_buffer(22)
     res = windll.kernel32.GetConsoleScreenBufferInfo(h, csbi)
 
-    if res:
-        (bufx, bufy, curx, cury, wattr,
-         left, top, right, bottom,
-         maxx, maxy) = struct.unpack("hhhhHhhhhhh", csbi.raw)
+    if not res:
+        left, top, right, bottom = struct.unpack("hhhhHhhhhhh", csbi.raw)[5:9]
         return right - left + 1, bottom - top + 1
 
 
-def _console_width(default=80):
-
-    if sys.platform.startswith('win'):
-        width, height = _csize_win()
-    else:
-        width, height = _csize_unix()
-
-    return width or default
-    
-    
-    
-
-
 class Progress(object):
-    def __init__(self, label='', unit='', scale=1):
+    def __init__(self, label='', unit='', interval=0.4, scale=1, bar=10, bar_chars='# ',
+                 spinner_chars='\\|/-'):
         self.label = label
         self.unit = unit
+        self.interval = interval
         self.scale = scale
-        self.barwidth = 10
-        self.interval = 0.4
-        self.tps = 0
+        self.bar = bar
+        self.bar_chars = bar_chars
+        self.spinner_chars = spinner_chars
 
+        self.tps = 0
         now = time.time()
-        self.count = 0
-        self.expected = None
+
+        self._done = 0
+        self._items = None
         self.started = now
         self.last_shown = 0
         self.last_change = now
@@ -79,26 +77,24 @@ class Progress(object):
 
         self.last_shown = now
 
-        if self.expected:
-            todo = self.expected - self.count
+        if self._items:
             if self.tps == 0:
                 eta = self.ftime(-1)
             else:
                 elapsed = now - self.last_change
-                eta = self.ftime(todo / self.tps - elapsed)
+                eta = self.ftime((self._items - self._done) / self.tps - elapsed)
 
-            done, all = self.count // self.scale, self.expected // self.scale
+            bar = self.fbar()
+            done = self.fvalue(self._done)
+            items = self.fvalue(self._items)
 
-            barlen = done * self.barwidth // all if all else 0
-            ws = int(math.log10(all) if all else 0) - int(math.log10(done) if done else 0)
+            if len(done) < len(items):
+                done = ' ' * (len(items) - len(done)) + done
 
-            line = ' [%s%s] %s%i/%i%s ETA %s' % (
-                '#' * barlen, ' ' * (self.barwidth - barlen),
-                ' ' * ws, done, all, self.unit, eta)
+            line = '[%s] %s/%s %s (ETA %s)' % (bar, done, items, self.unit, eta)
         else:
-            chars = u'|/—\\'
-            bar = chars[int((now - self.started) / self.interval) % len(chars)]            
-            line = u'[%s] %i%s (%.2f %s/s)' % (bar, self.count // self.scale, self.unit, self.tps, self.unit)
+            line = '[%s] %s %s (ETC %s)' % (
+            self.fspinner(), self.fvalue(self._done), self.unit, self.ftime(now - self.started))
 
         self.print_lr(self.label, line)
 
@@ -110,18 +106,43 @@ class Progress(object):
         hrs = delta // 60 // 60
         return '%02i:%02i:%02i' % (hrs, mns, sec)
 
+    def fvalue(self, value, maxdigits=4):
+        for fac, prefix in enumerate([''] + list(self.scale_prefix)):
+            test = float(value) / (self.scale ** fac)
+            if test < 1 or math.log10(test) + 1 < maxdigits:
+                if int(test * 10 ** maxdigits) % 10 ** maxdigits:
+                    return ('%f' % test)[:maxdigits] + prefix
+                else:
+                    return ('%i' % test) + prefix
+        return '*' * maxdigits
+
+    def fvalue(self, value, mindigits=4):
+        return str(value // self.scale)
+
+    def fbar(self, value=None):
+        if value is None:
+            value = float(self._done) / self._items if self._items else 0.0
+        on = int(value * self.bar)
+        off = self.bar - on
+        return '%s%s' % (self.bar_chars[0] * on, self.bar_chars[1] * off)
+
+    def fspinner(self, i=None):
+        if i is None:
+            i = (time.time() - self.started) / self.interval
+        return '%s' % self.spinner_chars[int(i) % len(self.spinner_chars)]
+
     def print_lr(self, label, line):
         cols = _console_width()
         ws = (cols - len(self.label) - len(line))
         if ws < 0:
             label = label[:ws - 4] + '... '
             ws = 0
-        sys.stderr.write(label + ' ' * ws + line + '\r')
+        sys.stderr.write('\r' + label + ' ' * ws + line)
         sys.stderr.flush()
 
     def println(self, line):
         line = str(line).rstrip()
-        cols = console_width({})
+        cols = _console_width({})
         if len(line) < cols:
             line += ' ' * (cols - len(line))
         sys.stderr.write(line + '\n')
@@ -147,55 +168,59 @@ class Progress(object):
         self.started = now
 
     def set_items(self, n):
-        self.expected = n
+        self._items = n
         self.show(force=True)
 
     def get_items(self):
-        return self.expected or 0
+        return self._items or 0
 
     items = property(get_items, set_items)
     del set_items, get_items
 
     def set_done(self, n):
-        self.count = n
+        self._done = n
         self.last_change = time.time()
-        self.tps = float(self.count) / (self.last_change - self.started)
-        if self.expected is not None and self.count > self.expected:
-            self.expected = self.count
+        self.tps = float(self._done) / (self.last_change - self.started)
+        if self._items is not None and self._done > self._items:
+            self._items = self._done
         self.show()
 
     def get_done(self):
-        return self.count
+        return self._done
 
     done = property(get_done, set_done)
     del set_done, get_done
 
     def __enter__(self):
-        self.reset()
         self.print_lr(self.label, "[...]")
         return self
 
     def __exit__(self, *a):
+        self.show(force=True)
+
         now = time.time()
         delta = now - self.started
 
-        if isinstance(a[1], KeyboardInterrupt):
-            return
-        if a[1]:
-            line = 'ERROR'
-        elif self.count:
-            line = '(%i%s in %s - %.2f %s/s) DONE' % (
-                self.count // self.scale, self.unit, self.ftime(max(1, delta)), self.count / self.scale / delta,
-                self.unit or '#'
+        if a[1] and isinstance(a[1], KeyboardInterrupt):
+            line = '[ABORT]'
+        elif a[1]:
+            line = '[%r]' % a[1]
+        elif self._done:
+            line = '[DONE] %s %s (%s)' % (
+                self.fvalue(self._done), self.unit, self.ftime(now-self.started)
             )
         else:
-            line = 'DONE'
+            line = '[DONE]'
 
         self.print_lr(self.label, line)
         sys.stderr.write('\n')
         sys.stderr.flush()
-        if a[1]:
-            sys.stderr.write('  %r\n' % a[1])
-            sys.stderr.flush()
 
+
+if __name__ == '__main__':
+    with Progress('Test %r' % sys.argv, 'MB') as p:
+        #p.items = int(sys.argv[1])
+        while p.done < int(sys.argv[1]):
+            p.done += 1
+            time.sleep(float(sys.argv[2]) / int(sys.argv[1]))
 
