@@ -16,7 +16,6 @@ def _console_width(default=80):
         width, height = _console_size_win()
     else:
         width, height = _console_size_unix()
-
     return width or default
 
 
@@ -25,7 +24,7 @@ def _console_size_unix():
     import fcntl
 
     if not IS_TTY:
-        return None
+        return 0, 0
 
     s = struct.pack("HHHH", 0, 0, 0, 0)
     fd_stdout = sys.stdout.fileno()
@@ -47,6 +46,8 @@ def _console_size_win():
     if not res:
         left, top, right, bottom = struct.unpack("hhhhHhhhhhh", csbi.raw)[5:9]
         return right - left + 1, bottom - top + 1
+
+    return 0, 0
 
 
 class Progress(object):
@@ -137,16 +138,14 @@ class Progress(object):
         if ws < 0:
             label = label[:ws - 4] + '... '
             ws = 0
-        sys.stderr.write('\r' + label + ' ' * ws + line)
-        sys.stderr.flush()
+        self._print('\r' + label + ' ' * ws + line)
 
     def println(self, line):
         line = str(line).rstrip()
-        cols = _console_width({})
+        cols = _console_width()
         if len(line) < cols:
             line += ' ' * (cols - len(line))
-        sys.stderr.write(line + '\n')
-        sys.stderr.flush()
+        self._print(line + '\n')
 
     def wrapiter(self, iterable):
         try:
@@ -213,8 +212,12 @@ class Progress(object):
             line = '[DONE]'
 
         self.print_lr(self.label, line)
-        sys.stderr.write('\n')
-        sys.stderr.flush()
+        self._print('\n')
+
+    def _print(self, str):
+        if IS_TTY:
+            sys.stderr.write(str)
+            sys.stderr.flush()
 
 
 if __name__ == '__main__':
